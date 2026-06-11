@@ -19,7 +19,7 @@ ORIGENS_CLIENTE = [
 
 
 def conectar():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -33,10 +33,12 @@ def dinheiro(valor):
 
 def executar_sql(sql, params=()):
     conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def carregar_clientes():
@@ -197,15 +199,61 @@ def preparar_clientes_com_resumo():
     return clientes_df
 
 
+def card_resumo(titulo, valor, ajuda):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{titulo}</div>
+            <div class="metric-value">{valor}</div>
+            <div class="metric-help">{ajuda}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def formatar_data(data_texto):
+    if not data_texto:
+        return "-"
+    try:
+        return pd.to_datetime(data_texto).strftime("%d/%m/%Y")
+    except Exception:
+        return "-"
+
+
+def card_cliente(cliente):
+    vip = cliente["vip"] == "Sim"
+    vip_texto = "⭐ CLIENTE VIP" if vip else "Cliente comum"
+
+    st.markdown(
+        f"""
+        <div class="panel">
+            <div class="panel-title">👤 {cliente["nome"]}</div>
+            <div class="op-msg">
+                📱 <b>{cliente["telefone"] or "-"}</b><br>
+                📍 {cliente["bairro_povoado"] or "-"} · {cliente["cidade"] or "-"}<br>
+                🎯 Origem: <b>{cliente["origem"] or "-"}</b><br>
+                {vip_texto}<br><br>
+
+                🛒 Compras: <b>{int(cliente["compras"])}</b><br>
+                💰 Total gasto: <b>{dinheiro(cliente["total_gasto"])}</b><br>
+                🎟️ Ticket médio: <b>{dinheiro(cliente["ticket_medio"])}</b><br>
+                📅 Última compra: <b>{formatar_data(cliente["ultima_compra"])}</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def tela_clientes():
     st.markdown(
         """
         <div class="hero">
-            <div class="hero-small">Relacionamento e inteligência comercial</div>
+            <div class="hero-small">Relacionamento comercial</div>
             <div class="hero-title">Clientes</div>
             <div class="hero-subtitle">
-                Cadastre clientes, acompanhe região, origem, perfil VIP
-                e tenha uma base comercial organizada para vender melhor.
+                Cadastre clientes, acompanhe histórico de compras, regiões, origem e perfil VIP.
             </div>
         </div>
         """,
@@ -216,50 +264,29 @@ def tela_clientes():
 
     total_clientes = len(clientes_df)
     clientes_vip = int((clientes_df["vip"] == "Sim").sum()) if not clientes_df.empty else 0
-    bairros = clientes_df["bairro_povoado"].dropna().nunique() if not clientes_df.empty else 0
+    regioes = clientes_df["bairro_povoado"].dropna().nunique() if not clientes_df.empty else 0
     com_compras = int((clientes_df["compras"].fillna(0) > 0).sum()) if not clientes_df.empty else 0
+    ticket_medio_geral = clientes_df["ticket_medio"].mean() if not clientes_df.empty else 0
 
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Clientes cadastrados</div>
-            <div class="metric-value">{total_clientes}</div>
-            <div class="metric-help">Base total de clientes</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("Clientes", total_clientes, "Base cadastrada")
 
     with c2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Clientes VIP</div>
-            <div class="metric-value">{clientes_vip}</div>
-            <div class="metric-help">Clientes estratégicos</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("VIP", clientes_vip, "Clientes estratégicos")
 
     with c3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Regiões atendidas</div>
-            <div class="metric-value">{bairros}</div>
-            <div class="metric-help">Bairros ou regiões</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("Regiões", regioes, "Áreas atendidas")
 
     with c4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Com compras</div>
-            <div class="metric-value">{com_compras}</div>
-            <div class="metric-help">Clientes com histórico</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("Ticket", dinheiro(ticket_medio_geral), "Média por cliente")
 
     st.markdown('<div class="section-title">Cadastrar cliente</div>', unsafe_allow_html=True)
 
     with st.form("form_cadastrar_cliente", clear_on_submit=True):
+        st.markdown('<div class="panel-title">📇 Dados básicos</div>', unsafe_allow_html=True)
+
         a1, a2 = st.columns([2, 1])
 
         with a1:
@@ -268,33 +295,37 @@ def tela_clientes():
         with a2:
             telefone = st.text_input("Telefone/WhatsApp *", placeholder="Ex: 98999990000")
 
-        b1, b2, b3 = st.columns(3)
+        b1, b2 = st.columns(2)
 
         with b1:
             cidade = st.text_input("Cidade *", placeholder="Ex: Itapecuru Mirim")
 
         with b2:
-            bairro_povoado = st.text_input("Bairro/Região *", placeholder="Ex: Centro, Bairro Novo, Zona Rural")
+            bairro_povoado = st.text_input("Bairro/Região *", placeholder="Ex: Centro, Bairro Novo")
 
-        with b3:
-            origem = st.selectbox("Origem do cliente", ORIGENS_CLIENTE)
+        st.markdown('<div class="panel-title">⭐ Perfil comercial</div>', unsafe_allow_html=True)
 
-        c1b, c2b = st.columns(2)
+        c1b, c2b, c3b = st.columns(3)
 
         with c1b:
+            origem = st.selectbox("Origem", ORIGENS_CLIENTE)
+
+        with c2b:
+            vip = st.selectbox("Cliente VIP?", ["Não", "Sim"])
+
+        with c3b:
             data_nascimento = st.date_input(
-                "Data de nascimento",
+                "Nascimento",
                 value=None,
                 min_value=date(1930, 1, 1),
                 max_value=date.today(),
             )
 
-        with c2b:
-            vip = st.selectbox("Cliente VIP?", ["Não", "Sim"])
+        st.markdown('<div class="panel-title">📝 Observações</div>', unsafe_allow_html=True)
 
         observacoes = st.text_area(
-            "Observações",
-            placeholder="Ex: gosta de promoções, compra para presente, prefere atendimento pelo WhatsApp...",
+            "Anotações importantes",
+            placeholder="Ex: gosta de promoções, compra para presente, prefere WhatsApp...",
         )
 
         salvar = st.form_submit_button("Salvar cliente")
@@ -337,20 +368,22 @@ def tela_clientes():
         )
         return
 
-    f1, f2, f3, f4 = st.columns([2, 1, 1, 1])
+    f1, f2 = st.columns([2, 1])
 
     with f1:
         busca = st.text_input("Buscar cliente", placeholder="Nome, telefone, bairro, cidade ou origem...")
 
     with f2:
+        filtro_vip = st.selectbox("VIP", ["Todos", "Sim", "Não"])
+
+    f3, f4 = st.columns(2)
+
+    with f3:
         bairros_lista = ["Todos"] + sorted([x for x in clientes_df["bairro_povoado"].dropna().unique()])
         filtro_bairro = st.selectbox("Bairro/Região", bairros_lista)
 
-    with f3:
-        filtro_origem = st.selectbox("Origem", ["Todas"] + ORIGENS_CLIENTE)
-
     with f4:
-        filtro_vip = st.selectbox("VIP", ["Todos", "Sim", "Não"])
+        filtro_origem = st.selectbox("Origem", ["Todas"] + ORIGENS_CLIENTE)
 
     df = clientes_df.copy()
 
@@ -373,39 +406,63 @@ def tela_clientes():
     if filtro_vip != "Todos":
         df = df[df["vip"] == filtro_vip]
 
-    tabela = df.copy()
-    tabela["Total gasto"] = tabela["total_gasto"].fillna(0).apply(dinheiro)
-    tabela["Ticket médio"] = tabela["ticket_medio"].fillna(0).apply(dinheiro)
-    tabela["Compras"] = tabela["compras"].fillna(0).astype(int)
+    if df.empty:
+        st.markdown(
+            '<div class="empty-state">Nenhum cliente encontrado com os filtros atuais.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="alert-good">
+                {len(df)} cliente(s) encontrado(s).
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    tabela = tabela[
-        [
-            "id",
-            "nome",
-            "telefone",
-            "cidade",
-            "bairro_povoado",
-            "origem",
-            "vip",
-            "Compras",
-            "Total gasto",
-            "Ticket médio",
-            "ultima_compra",
-        ]
-    ].rename(
-        columns={
-            "id": "ID",
-            "nome": "Cliente",
-            "telefone": "Telefone",
-            "cidade": "Cidade",
-            "bairro_povoado": "Bairro/Região",
-            "origem": "Origem",
-            "vip": "VIP",
-            "ultima_compra": "Última compra",
-        }
-    )
+        df_cards = df.sort_values(["vip", "total_gasto"], ascending=[False, False])
 
-    st.dataframe(tabela, use_container_width=True, hide_index=True)
+        for _, cliente in df_cards.head(12).iterrows():
+            card_cliente(cliente)
+
+        if len(df_cards) > 12:
+            st.info("Mostrando os 12 primeiros clientes. Use a busca ou filtros para refinar.")
+
+        with st.expander("Ver tabela completa"):
+            tabela = df.copy()
+            tabela["Total gasto"] = tabela["total_gasto"].fillna(0).apply(dinheiro)
+            tabela["Ticket médio"] = tabela["ticket_medio"].fillna(0).apply(dinheiro)
+            tabela["Compras"] = tabela["compras"].fillna(0).astype(int)
+            tabela["Última compra"] = tabela["ultima_compra"].apply(formatar_data)
+
+            tabela = tabela[
+                [
+                    "id",
+                    "nome",
+                    "telefone",
+                    "cidade",
+                    "bairro_povoado",
+                    "origem",
+                    "vip",
+                    "Compras",
+                    "Total gasto",
+                    "Ticket médio",
+                    "Última compra",
+                ]
+            ].rename(
+                columns={
+                    "id": "ID",
+                    "nome": "Cliente",
+                    "telefone": "Telefone",
+                    "cidade": "Cidade",
+                    "bairro_povoado": "Bairro/Região",
+                    "origem": "Origem",
+                    "vip": "VIP",
+                }
+            )
+
+            st.dataframe(tabela, use_container_width=True, hide_index=True)
 
     st.markdown('<div class="section-title">Editar cliente</div>', unsafe_allow_html=True)
 
@@ -415,7 +472,24 @@ def tela_clientes():
     cliente_id = int(selecionado.split(" - ")[0])
     cliente = clientes_df[clientes_df["id"] == cliente_id].iloc[0]
 
+    st.markdown(
+        f"""
+        <div class="panel">
+            <div class="panel-title">Editando: {cliente["nome"]}</div>
+            <div class="op-msg">
+                Telefone: <b>{cliente["telefone"] or "-"}</b><br>
+                Região: <b>{cliente["bairro_povoado"] or "-"}</b><br>
+                Compras: <b>{int(cliente["compras"])}</b><br>
+                Total gasto: <b>{dinheiro(cliente["total_gasto"])}</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     with st.form("form_editar_cliente"):
+        st.markdown('<div class="panel-title">📇 Dados básicos</div>', unsafe_allow_html=True)
+
         e1, e2 = st.columns([2, 1])
 
         with e1:
@@ -424,13 +498,17 @@ def tela_clientes():
         with e2:
             telefone_edit = st.text_input("Telefone", value=cliente["telefone"] or "")
 
-        e3, e4, e5 = st.columns(3)
+        e3, e4 = st.columns(2)
 
         with e3:
             cidade_edit = st.text_input("Cidade", value=cliente["cidade"] or "")
 
         with e4:
             bairro_edit = st.text_input("Bairro/Região", value=cliente["bairro_povoado"] or "")
+
+        st.markdown('<div class="panel-title">⭐ Perfil</div>', unsafe_allow_html=True)
+
+        e5, e6, e7 = st.columns(3)
 
         with e5:
             origem_edit = st.selectbox(
@@ -441,9 +519,14 @@ def tela_clientes():
                 else 0,
             )
 
-        e6, e7 = st.columns(2)
-
         with e6:
+            vip_edit = st.selectbox(
+                "VIP?",
+                ["Não", "Sim"],
+                index=1 if cliente["vip"] == "Sim" else 0,
+            )
+
+        with e7:
             data_padrao = None
             if cliente["data_nascimento"]:
                 try:
@@ -452,17 +535,10 @@ def tela_clientes():
                     data_padrao = None
 
             data_nascimento_edit = st.date_input(
-                "Data de nascimento",
+                "Nascimento",
                 value=data_padrao,
                 min_value=date(1930, 1, 1),
                 max_value=date.today(),
-            )
-
-        with e7:
-            vip_edit = st.selectbox(
-                "VIP?",
-                ["Não", "Sim"],
-                index=1 if cliente["vip"] == "Sim" else 0,
             )
 
         observacoes_edit = st.text_area("Observações", value=cliente["observacoes"] or "")

@@ -7,25 +7,44 @@ import streamlit as st
 from config import DATABASE_PATH
 
 
+TIPOS_DATA = [
+    "Feriado nacional",
+    "Feriado estadual",
+    "Feriado municipal",
+    "Loja fechada",
+    "Evento especial",
+]
+
+
 def conectar():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def executar_sql(sql, params=()):
     conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def carregar_df(query, params=()):
     conn = conectar()
-    df = pd.read_sql_query(query, conn, params=params)
-    conn.close()
-    return df
+    try:
+        return pd.read_sql_query(query, conn, params=params)
+    finally:
+        conn.close()
+
+
+def formatar_data(data_texto):
+    try:
+        return pd.to_datetime(data_texto).strftime("%d/%m/%Y")
+    except Exception:
+        return "-"
 
 
 def calcular_pascoa(ano):
@@ -63,9 +82,7 @@ def feriados_base_ano(ano):
         (date(ano, 11, 15), "Proclamação da República", "Feriado nacional"),
         (date(ano, 11, 20), "Consciência Negra", "Feriado nacional"),
         (date(ano, 12, 25), "Natal", "Feriado nacional"),
-
         (date(ano, 7, 28), "Adesão do Maranhão à Independência", "Feriado estadual"),
-
         (date(ano, 7, 21), "Aniversário de Itapecuru Mirim", "Feriado municipal"),
         (date(ano, 9, 15), "Nossa Senhora das Dores", "Feriado municipal"),
     ]
@@ -186,15 +203,34 @@ def calcular_dias_meta_restantes(ano, mes):
     return [d for d in dias_meta if d >= hoje]
 
 
+def card_resumo(titulo, valor, ajuda):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{titulo}</div>
+            <div class="metric-value">{valor}</div>
+            <div class="metric-help">{ajuda}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def renderizar_data_card(item):
+    st.markdown(f"### 📅 {formatar_data(item['data'])}")
+    st.write(f"**Descrição:** {item['descricao']}")
+    st.write(f"**Tipo:** {item['tipo']}")
+    st.divider()
+
+
 def tela_calendario():
     st.markdown(
         """
         <div class="hero">
             <div class="hero-small">Calendário comercial</div>
-            <div class="hero-title">Calendário da Airesbella</div>
+            <div class="hero-title">Calendário</div>
             <div class="hero-subtitle">
-                Controle feriados, dias fechados e eventos especiais para calcular metas reais
-                considerando apenas os dias em que a loja deve vender.
+                Controle feriados, dias fechados e eventos especiais para calcular metas reais de venda.
             </div>
         </div>
         """,
@@ -204,26 +240,53 @@ def tela_calendario():
     hoje = date.today()
     ano = st.number_input("Ano", min_value=2025, max_value=2035, value=hoje.year, step=1)
 
-    c1, c2, c3 = st.columns(3)
+    calendario = carregar_calendario(int(ano))
+
+    total_datas = len(calendario)
+    feriados = int(calendario[calendario["tipo"].str.contains("Feriado", na=False)].shape[0]) if not calendario.empty else 0
+    loja_fechada = int((calendario["tipo"] == "Loja fechada").sum()) if not calendario.empty else 0
+    eventos = int((calendario["tipo"] == "Evento especial").sum()) if not calendario.empty else 0
+
+    dias_meta_mes = calcular_dias_meta_mes(int(ano), hoje.month)
+    dias_restantes = calcular_dias_meta_restantes(int(ano), hoje.month)
+
+    st.markdown('<div class="section-title">Resumo do calendário</div>', unsafe_allow_html=True)
+
+    c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        if st.button("Importar feriados do ano"):
-            qtd = importar_feriados_ano(int(ano))
-            st.success(f"{qtd} feriado(s) importado(s). Datas já existentes foram mantidas.")
-            st.rerun()
+        card_resumo("Datas", total_datas, "Cadastradas no ano")
 
     with c2:
-        dias_meta_mes = calcular_dias_meta_mes(int(ano), hoje.month)
-        st.metric("Dias de meta no mês atual", len(dias_meta_mes))
+        card_resumo("Feriados", feriados, "Nacionais, estaduais e municipais")
 
     with c3:
-        dias_restantes = calcular_dias_meta_restantes(int(ano), hoje.month)
-        st.metric("Dias de meta restantes", len(dias_restantes))
+        card_resumo("Fechados", loja_fechada, "Dias sem operação")
+
+    with c4:
+        card_resumo("Eventos", eventos, "Datas especiais")
+
+    c5, c6 = st.columns(2)
+
+    with c5:
+        card_resumo("Dias de meta", len(dias_meta_mes), "Mês atual")
+
+    with c6:
+        card_resumo("Restantes", len(dias_restantes), "Dias úteis restantes")
+
+    st.markdown('<div class="section-title">Importação rápida</div>', unsafe_allow_html=True)
+
+    st.info("Importe os feriados nacionais, estaduais e municipais cadastrados para o ano selecionado.")
+
+    if st.button("Importar feriados do ano"):
+        qtd = importar_feriados_ano(int(ano))
+        st.success(f"{qtd} feriado(s) importado(s). Datas já existentes foram mantidas.")
+        st.rerun()
 
     st.markdown('<div class="section-title">Cadastrar data especial</div>', unsafe_allow_html=True)
 
     with st.form("form_calendario"):
-        f1, f2, f3 = st.columns([1, 2, 1])
+        f1, f2 = st.columns([1, 2])
 
         with f1:
             data_item = st.date_input("Data", value=hoje)
@@ -231,17 +294,7 @@ def tela_calendario():
         with f2:
             descricao = st.text_input("Descrição", placeholder="Ex: Feriado municipal, inventário, evento especial...")
 
-        with f3:
-            tipo = st.selectbox(
-                "Tipo",
-                [
-                    "Feriado nacional",
-                    "Feriado estadual",
-                    "Feriado municipal",
-                    "Loja fechada",
-                    "Evento especial",
-                ],
-            )
+        tipo = st.selectbox("Tipo", TIPOS_DATA)
 
         salvar = st.form_submit_button("Salvar data")
 
@@ -262,25 +315,57 @@ def tela_calendario():
             '<div class="empty-state">Nenhuma data cadastrada para este ano. Clique em importar feriados do ano.</div>',
             unsafe_allow_html=True,
         )
-    else:
-        tabela = calendario.copy()
-        tabela["Data"] = pd.to_datetime(tabela["data"]).dt.strftime("%d/%m/%Y")
-        tabela = tabela[["id", "Data", "descricao", "tipo"]].rename(
-            columns={
-                "id": "ID",
-                "descricao": "Descrição",
-                "tipo": "Tipo",
-            }
+        return
+
+    busca = st.text_input("Buscar data", placeholder="Descrição ou tipo...")
+
+    filtro_tipo = st.selectbox("Filtrar por tipo", ["Todos"] + TIPOS_DATA)
+
+    df = calendario.copy()
+
+    if busca:
+        b = busca.lower()
+        df = df[
+            df["descricao"].fillna("").str.lower().str.contains(b)
+            | df["tipo"].fillna("").str.lower().str.contains(b)
+        ]
+
+    if filtro_tipo != "Todos":
+        df = df[df["tipo"] == filtro_tipo]
+
+    if df.empty:
+        st.markdown(
+            '<div class="empty-state">Nenhuma data encontrada com os filtros atuais.</div>',
+            unsafe_allow_html=True,
         )
-        st.dataframe(tabela, use_container_width=True, hide_index=True)
+    else:
+        st.success(f"{len(df)} data(s) encontrada(s).")
 
-        st.markdown('<div class="section-title">Excluir data</div>', unsafe_allow_html=True)
+        for _, item in df.head(20).iterrows():
+            renderizar_data_card(item)
 
-        opcoes = calendario["id"].astype(str) + " - " + calendario["data"] + " - " + calendario["descricao"]
-        selecionado = st.selectbox("Selecione uma data para excluir", opcoes)
+        if len(df) > 20:
+            st.info("Mostrando as 20 primeiras datas. Use a busca ou filtro para refinar.")
 
-        if st.button("Excluir data selecionada"):
-            registro_id = int(selecionado.split(" - ")[0])
-            excluir_data_especial(registro_id)
-            st.success("Data excluída com sucesso.")
-            st.rerun()
+        with st.expander("Ver tabela completa"):
+            tabela = df.copy()
+            tabela["Data"] = pd.to_datetime(tabela["data"]).dt.strftime("%d/%m/%Y")
+            tabela = tabela[["id", "Data", "descricao", "tipo"]].rename(
+                columns={
+                    "id": "ID",
+                    "descricao": "Descrição",
+                    "tipo": "Tipo",
+                }
+            )
+            st.dataframe(tabela, use_container_width=True, hide_index=True)
+
+    st.markdown('<div class="section-title">Excluir data</div>', unsafe_allow_html=True)
+
+    opcoes = calendario["id"].astype(str) + " - " + calendario["data"] + " - " + calendario["descricao"]
+    selecionado = st.selectbox("Selecione uma data para excluir", opcoes)
+
+    if st.button("Excluir data selecionada"):
+        registro_id = int(selecionado.split(" - ")[0])
+        excluir_data_especial(registro_id)
+        st.success("Data excluída com sucesso.")
+        st.rerun()

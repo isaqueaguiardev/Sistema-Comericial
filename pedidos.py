@@ -19,7 +19,7 @@ STATUS_PEDIDOS_GESTAO = [
 
 
 def conectar():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -31,19 +31,31 @@ def dinheiro(valor):
         return "R$ 0,00"
 
 
+def formatar_data(data_texto):
+    if not data_texto:
+        return "-"
+    try:
+        return pd.to_datetime(data_texto).strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return str(data_texto)
+
+
 def carregar_df(query, params=()):
     conn = conectar()
-    df = pd.read_sql_query(query, conn, params=params)
-    conn.close()
-    return df
+    try:
+        return pd.read_sql_query(query, conn, params=params)
+    finally:
+        conn.close()
 
 
 def executar_sql(sql, params=()):
     conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def carregar_pedidos(data_ini, data_fim):
@@ -122,54 +134,141 @@ def cancelar_pedido_com_estorno(pedido_id):
     conn = conectar()
     cursor = conn.cursor()
 
-    cursor.execute(
-        """
-        SELECT produto_id, quantidade
-        FROM pedido_itens
-        WHERE pedido_id = ?
-        """,
-        (pedido_id,),
-    )
-    itens = cursor.fetchall()
-
-    for item in itens:
+    try:
         cursor.execute(
             """
-            UPDATE produtos
-            SET estoque_atual = estoque_atual + ?
+            SELECT produto_id, quantidade
+            FROM pedido_itens
+            WHERE pedido_id = ?
+            """,
+            (pedido_id,),
+        )
+        itens = cursor.fetchall()
+
+        for item in itens:
+            cursor.execute(
+                """
+                UPDATE produtos
+                SET estoque_atual = estoque_atual + ?
+                WHERE id = ?
+                """,
+                (item["quantidade"], item["produto_id"]),
+            )
+
+            cursor.execute(
+                """
+                INSERT INTO estoque_movimentos (
+                    produto_id, tipo, quantidade, motivo, data_movimento
+                )
+                VALUES (?, ?, ?, ?, datetime('now', 'localtime'))
+                """,
+                (
+                    item["produto_id"],
+                    "Devolução",
+                    item["quantidade"],
+                    f"Cancelamento do pedido #{pedido_id}",
+                ),
+            )
+
+        cursor.execute(
+            """
+            UPDATE pedidos
+            SET status = 'Cancelado'
             WHERE id = ?
             """,
-            (item["quantidade"], item["produto_id"]),
+            (pedido_id,),
         )
 
-        cursor.execute(
-            """
-            INSERT INTO estoque_movimentos (
-                produto_id, tipo, quantidade, motivo, data_movimento
-            )
-            VALUES (?, ?, ?, ?, datetime('now', 'localtime'))
-            """,
-            (
-                item["produto_id"],
-                "Devolução",
-                item["quantidade"],
-                f"Cancelamento do pedido #{pedido_id}",
-            ),
-        )
+        conn.commit()
+        return True, "Pedido cancelado e estoque devolvido com sucesso."
 
-    cursor.execute(
-        """
-        UPDATE pedidos
-        SET status = 'Cancelado'
-        WHERE id = ?
+    except Exception as e:
+        conn.rollback()
+        return False, f"Erro ao cancelar pedido: {e}"
+
+    finally:
+        conn.close()
+
+
+def card_resumo(titulo, valor, ajuda):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{titulo}</div>
+            <div class="metric-value">{valor}</div>
+            <div class="metric-help">{ajuda}</div>
+        </div>
         """,
-        (pedido_id,),
+        unsafe_allow_html=True,
     )
 
-    conn.commit()
-    conn.close()
 
-    return True, "Pedido cancelado e estoque devolvido com sucesso."
+def status_badge(status):
+    if status == "Cancelado":
+        return "🔴 Cancelado"
+    if status == "Entregue":
+        return "🟢 Entregue"
+    if status == "Pago":
+        return "✅ Pago"
+    if status in ["Separando", "Pronto para entrega"]:
+        return "🟡 " + status
+    if status == "Saiu para entrega":
+        return "🚚 Saiu para entrega"
+    return "⚪ " + str(status)
+
+
+def tipo_entrega_badge(tipo):
+    if tipo == "Entrega":
+        return "🚚 Entrega"
+    return "🏪 Retirada"
+
+
+def filtrar_pedidos(df, filtro_status, filtro_entrega, busca):
+    filtrado = df.copy()
+
+    if filtro_status != "Todos":
+        filtrado = filtrado[filtrado["status"] == filtro_status]
+
+    if filtro_entrega != "Todos":
+        filtrado = filtrado[filtrado["tipo_entrega"] == filtro_entrega]
+
+    if busca:
+        b = busca.lower()
+        filtrado = filtrado[
+            filtrado["id"].astype(str).str.contains(b)
+            | filtrado["cliente"].fillna("").str.lower().str.contains(b)
+            | filtrado["telefone_cliente"].fillna("").str.lower().str.contains(b)
+            | filtrado["forma_pagamento"].fillna("").str.lower().str.contains(b)
+            | filtrado["status"].fillna("").str.lower().str.contains(b)
+        ]
+
+    return filtrado
+
+
+def renderizar_card_pedido(pedido):
+    cliente = pedido["cliente"] if pd.notna(pedido["cliente"]) else "Consumidor final"
+    telefone = pedido["telefone_cliente"] if pd.notna(pedido["telefone_cliente"]) else "-"
+    bairro = pedido["bairro_entrega"] if pd.notna(pedido["bairro_entrega"]) else "-"
+
+    st.markdown(f"### 🧾 Pedido #{int(pedido['id'])}")
+    st.write(f"👤 **Cliente:** {cliente}")
+    st.write(f"📱 **Telefone:** {telefone}")
+    st.write(f"📅 **Data:** {formatar_data(pedido['data_pedido'])}")
+    st.write(f"💰 **Total:** {dinheiro(pedido['total'])}")
+    st.write(f"📈 **Lucro:** {dinheiro(pedido['lucro_bruto'])}")
+    st.write(f"💳 **Pagamento:** {pedido['forma_pagamento'] or '-'}")
+    st.write(status_badge(pedido["status"]))
+    st.write(f"{tipo_entrega_badge(pedido['tipo_entrega'])} · Região: **{bairro}**")
+
+
+def renderizar_item_pedido(item):
+    st.markdown(f"#### 📦 {item['produto']}")
+    st.write(f"SKU: **{item['codigo_sku'] or '-'}**")
+    st.write(f"Quantidade: **{int(item['quantidade'])}**")
+    st.write(f"Preço unitário: **{dinheiro(item['preco_unitario'])}**")
+    st.write(f"Total: **{dinheiro(item['total_item'])}**")
+    st.write(f"Lucro: **{dinheiro(item['lucro_item'])}**")
+    st.divider()
 
 
 def tela_pedidos():
@@ -179,19 +278,19 @@ def tela_pedidos():
             <div class="hero-small">Central operacional</div>
             <div class="hero-title">Pedidos</div>
             <div class="hero-subtitle">
-                Consulte pedidos, acompanhe entregas, visualize itens, altere status e cancele pedidos com devolução automática ao estoque.
+                Acompanhe vendas, entregas, status, itens e cancelamentos com devolução automática ao estoque.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="section-title">Filtros</div>', unsafe_allow_html=True)
-
     hoje = date.today()
     inicio_mes = hoje.replace(day=1)
 
-    f1, f2, f3, f4 = st.columns([1, 1, 1, 1])
+    st.markdown('<div class="section-title">Filtros</div>', unsafe_allow_html=True)
+
+    f1, f2 = st.columns(2)
 
     with f1:
         data_inicial = st.date_input("Data inicial", value=inicio_mes)
@@ -208,42 +307,27 @@ def tela_pedidos():
         data_final.strftime("%Y-%m-%d"),
     )
 
+    f3, f4 = st.columns(2)
+
     with f3:
-        filtro_status = st.selectbox(
-            "Status",
-            ["Todos"] + STATUS_PEDIDOS_GESTAO,
-        )
+        filtro_status = st.selectbox("Status", ["Todos"] + STATUS_PEDIDOS_GESTAO)
 
     with f4:
-        filtro_entrega = st.selectbox(
-            "Entrega",
-            ["Todos", "Retirada", "Entrega"],
-        )
+        filtro_entrega = st.selectbox("Entrega", ["Todos", "Retirada", "Entrega"])
 
     busca = st.text_input(
         "Buscar pedido",
-        placeholder="Digite número do pedido, cliente, telefone ou outros...",
+        placeholder="Pedido, cliente, telefone, pagamento ou status...",
     )
 
-    df = pedidos_df.copy()
-
-    if filtro_status != "Todos":
-        df = df[df["status"] == filtro_status]
-
-    if filtro_entrega != "Todos":
-        df = df[df["tipo_entrega"] == filtro_entrega]
-
-    if busca:
-        b = busca.lower()
-        df = df[
-            df["id"].astype(str).str.contains(b)
-            | df["cliente"].fillna("").str.lower().str.contains(b)
-            | df["telefone_cliente"].fillna("").str.lower().str.contains(b)
-        ]
+    df = filtrar_pedidos(pedidos_df, filtro_status, filtro_entrega, busca)
 
     total_pedidos = len(df)
     faturamento = df["total"].sum() if not df.empty else 0
     lucro = df["lucro_bruto"].sum() if not df.empty else 0
+    ticket_medio = faturamento / total_pedidos if total_pedidos else 0
+    maior_venda = df["total"].max() if not df.empty else 0
+
     entregas_pendentes = (
         df[
             (df["tipo_entrega"] == "Entrega")
@@ -253,43 +337,29 @@ def tela_pedidos():
         else 0
     )
 
+    pedidos_cancelados = int((df["status"] == "Cancelado").sum()) if not df.empty else 0
+
     c1, c2, c3, c4 = st.columns(4)
 
     with c1:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Pedidos</div>
-            <div class="metric-value">{total_pedidos}</div>
-            <div class="metric-help">Dentro dos filtros</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("Pedidos", total_pedidos, "Dentro dos filtros")
 
     with c2:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Faturamento</div>
-            <div class="metric-value">{dinheiro(faturamento)}</div>
-            <div class="metric-help">Total dos pedidos</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("Faturamento", dinheiro(faturamento), "Total vendido")
 
     with c3:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Lucro bruto</div>
-            <div class="metric-value">{dinheiro(lucro)}</div>
-            <div class="metric-help">Venda menos custo</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("Ticket médio", dinheiro(ticket_medio), "Média por pedido")
 
     with c4:
-        st.markdown(f"""
-        <div class="metric-card">
-            <div class="metric-label">Entregas pendentes</div>
-            <div class="metric-value">{entregas_pendentes}</div>
-            <div class="metric-help">Ainda não entregues</div>
-        </div>
-        """, unsafe_allow_html=True)
+        card_resumo("Entregas", entregas_pendentes, "Pendentes")
+
+    c5, c6 = st.columns(2)
+
+    with c5:
+        card_resumo("Maior venda", dinheiro(maior_venda), "Maior pedido filtrado")
+
+    with c6:
+        card_resumo("Cancelados", pedidos_cancelados, "Pedidos cancelados")
 
     st.markdown('<div class="section-title">Lista de pedidos</div>', unsafe_allow_html=True)
 
@@ -300,126 +370,128 @@ def tela_pedidos():
         )
         return
 
-    tabela = df.copy()
-    tabela["Cliente"] = tabela["cliente"].fillna("Consumidor final")
-    tabela["Total"] = tabela["total"].apply(dinheiro)
-    tabela["Lucro"] = tabela["lucro_bruto"].apply(dinheiro)
-    tabela["Taxa Entrega"] = tabela["taxa_entrega"].fillna(0).apply(dinheiro)
-
-    tabela_view = tabela[
-        [
-            "id",
-            "data_pedido",
-            "Cliente",
-            "telefone_cliente",
-            "tipo_venda",
-            "forma_pagamento",
-            "status",
-            "tipo_entrega",
-            "bairro_entrega",
-            "Taxa Entrega",
-            "Total",
-            "Lucro",
-        ]
-    ].rename(
-        columns={
-            "id": "Pedido",
-            "data_pedido": "Data",
-            "telefone_cliente": "Telefone",
-            "tipo_venda": "Tipo venda",
-            "forma_pagamento": "Pagamento",
-            "status": "Status",
-            "tipo_entrega": "Entrega",
-            "bairro_entrega": "Bairro entrega",
-        }
+    st.markdown(
+        f"""
+        <div class="alert-good">
+            {len(df)} pedido(s) encontrado(s). Toque em um pedido para ver detalhes e ações.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    st.dataframe(tabela_view, use_container_width=True, hide_index=True)
+    for _, pedido in df.head(15).iterrows():
+        cliente_nome = pedido["cliente"] if pd.notna(pedido["cliente"]) else "Consumidor final"
+        titulo_expander = (
+            f"Pedido #{int(pedido['id'])} · {cliente_nome} · "
+            f"{dinheiro(pedido['total'])} · {pedido['status']}"
+        )
 
-    st.markdown('<div class="section-title">Detalhes e gestão do pedido</div>', unsafe_allow_html=True)
+        with st.expander(titulo_expander):
+            renderizar_card_pedido(pedido)
 
-    opcoes = df["id"].astype(str) + " - " + df["cliente"].fillna("Consumidor final") + " - " + df["total"].apply(dinheiro)
-    pedido_selecionado = st.selectbox("Selecione um pedido", opcoes)
+            itens = carregar_itens_pedido(int(pedido["id"]))
 
-    pedido_id = int(pedido_selecionado.split(" - ")[0])
-    pedido = pedidos_df[pedidos_df["id"] == pedido_id].iloc[0]
-    itens = carregar_itens_pedido(pedido_id)
+            st.markdown("### Itens do pedido")
 
-    d1, d2, d3 = st.columns(3)
+            if itens.empty:
+                st.warning("Nenhum item encontrado para este pedido.")
+            else:
+                for _, item in itens.iterrows():
+                    renderizar_item_pedido(item)
 
-    with d1:
-        st.markdown("### Cliente")
-        st.write(pedido["cliente"] if pd.notna(pedido["cliente"]) else "Consumidor final")
-        st.write(pedido["telefone_cliente"] if pd.notna(pedido["telefone_cliente"]) else "-")
+            if pedido["tipo_entrega"] == "Entrega":
+                st.markdown("### 🚚 Dados de entrega")
+                st.write(f"**Endereço:** {pedido['endereco_entrega'] or '-'}")
+                st.write(f"**Bairro/Região:** {pedido['bairro_entrega'] or '-'}")
+                st.write(f"**Referência:** {pedido['referencia_entrega'] or '-'}")
+                st.write(f"**Taxa:** {dinheiro(pedido['taxa_entrega'])}")
+            else:
+                st.info("Tipo de entrega: Retirada")
 
-    with d2:
-        st.markdown("### Pedido")
-        st.write(f"Pedido #{pedido_id}")
-        st.write(f"Status: {pedido['status']}")
-        st.write(f"Pagamento: {pedido['forma_pagamento']}")
+            st.markdown("### Gestão do pedido")
 
-    with d3:
-        st.markdown("### Valores")
-        st.write(f"Total: {dinheiro(pedido['total'])}")
-        st.write(f"Lucro bruto: {dinheiro(pedido['lucro_bruto'])}")
-        st.write(f"Desconto: {dinheiro(pedido['desconto'])}")
+            status_atual = pedido["status"]
+            index_status = (
+                STATUS_PEDIDOS_GESTAO.index(status_atual)
+                if status_atual in STATUS_PEDIDOS_GESTAO
+                else 0
+            )
 
-    if pedido["tipo_entrega"] == "Entrega":
-        st.markdown("### Dados de entrega")
-        st.write(f"Endereço: {pedido['endereco_entrega']}")
-        st.write(f"Bairro/Povoado: {pedido['bairro_entrega']}")
-        st.write(f"Referência: {pedido['referencia_entrega']}")
-        st.write(f"Taxa: {dinheiro(pedido['taxa_entrega'])}")
-    else:
-        st.info("Tipo de entrega: Retirada")
+            novo_status = st.selectbox(
+                "Novo status",
+                STATUS_PEDIDOS_GESTAO,
+                index=index_status,
+                key=f"novo_status_{int(pedido['id'])}",
+            )
 
-    st.markdown("### Itens do pedido")
+            a1, a2 = st.columns(2)
 
-    if itens.empty:
-        st.warning("Nenhum item encontrado para este pedido.")
-    else:
-        itens_view = itens.copy()
-        itens_view["Preço"] = itens_view["preco_unitario"].apply(dinheiro)
-        itens_view["Total"] = itens_view["total_item"].apply(dinheiro)
-        itens_view["Lucro"] = itens_view["lucro_item"].apply(dinheiro)
+            with a1:
+                salvar_status = st.button(
+                    "Salvar status",
+                    key=f"salvar_status_{int(pedido['id'])}",
+                )
 
-        itens_view = itens_view[
-            ["codigo_sku", "produto", "quantidade", "Preço", "Total", "Lucro"]
+            with a2:
+                cancelar = st.button(
+                    "Cancelar e devolver estoque",
+                    key=f"cancelar_pedido_{int(pedido['id'])}",
+                )
+
+            if salvar_status:
+                if status_atual == "Cancelado":
+                    st.warning("Pedido cancelado não deve ter status alterado.")
+                elif novo_status == "Cancelado":
+                    st.warning("Para cancelar, use o botão de cancelamento com estorno de estoque.")
+                else:
+                    atualizar_status_pedido(int(pedido["id"]), novo_status)
+                    st.success("Status atualizado com sucesso.")
+                    st.rerun()
+
+            if cancelar:
+                ok, msg = cancelar_pedido_com_estorno(int(pedido["id"]))
+                if ok:
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.warning(msg)
+
+    if len(df) > 15:
+        st.info("Mostrando os 15 pedidos mais recentes dentro do filtro. Use a busca para localizar pedidos antigos.")
+
+    with st.expander("Ver tabela completa"):
+        tabela = df.copy()
+        tabela["Cliente"] = tabela["cliente"].fillna("Consumidor final")
+        tabela["Total"] = tabela["total"].apply(dinheiro)
+        tabela["Lucro"] = tabela["lucro_bruto"].apply(dinheiro)
+        tabela["Taxa Entrega"] = tabela["taxa_entrega"].fillna(0).apply(dinheiro)
+        tabela["Data"] = tabela["data_pedido"].apply(formatar_data)
+
+        tabela_view = tabela[
+            [
+                "id",
+                "Data",
+                "Cliente",
+                "telefone_cliente",
+                "tipo_venda",
+                "forma_pagamento",
+                "status",
+                "tipo_entrega",
+                "bairro_entrega",
+                "Taxa Entrega",
+                "Total",
+                "Lucro",
+            ]
         ].rename(
             columns={
-                "codigo_sku": "SKU",
-                "produto": "Produto",
-                "quantidade": "Qtd",
+                "id": "Pedido",
+                "telefone_cliente": "Telefone",
+                "tipo_venda": "Tipo venda",
+                "forma_pagamento": "Pagamento",
+                "status": "Status",
+                "tipo_entrega": "Entrega",
+                "bairro_entrega": "Bairro entrega",
             }
         )
 
-        st.dataframe(itens_view, use_container_width=True, hide_index=True)
-
-    st.markdown("### Alterar status")
-
-    status_atual = pedido["status"]
-    index_status = STATUS_PEDIDOS_GESTAO.index(status_atual) if status_atual in STATUS_PEDIDOS_GESTAO else 0
-
-    novo_status = st.selectbox("Novo status", STATUS_PEDIDOS_GESTAO, index=index_status)
-
-    a1, a2 = st.columns(2)
-
-    with a1:
-        if st.button("Salvar novo status"):
-            if status_atual == "Cancelado":
-                st.warning("Pedido cancelado não deve ter status alterado.")
-            elif novo_status == "Cancelado":
-                st.warning("Para cancelar, use o botão de cancelamento com estorno de estoque.")
-            else:
-                atualizar_status_pedido(pedido_id, novo_status)
-                st.success("Status atualizado com sucesso.")
-                st.rerun()
-
-    with a2:
-        if st.button("Cancelar pedido e devolver estoque"):
-            ok, msg = cancelar_pedido_com_estorno(pedido_id)
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.warning(msg)
+        st.dataframe(tabela_view, use_container_width=True, hide_index=True)

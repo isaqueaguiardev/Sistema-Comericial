@@ -1,22 +1,22 @@
 # ============================================================
-# CONFIGURAÇÕES GERAIS DO SISTEMA AIRESBELLA
+# CONFIGURAÇÕES GERAIS DO SISTEMA COMERCIAL
 # ============================================================
 
 APP_NAME = "Sistema de Gestão"
 APP_VERSION = "1.0.0"
 
-DATABASE_PATH = "database/airesbella.db"
+DATABASE_PATH = "database/sistema.db"
 
 EMPRESA = {
     "logo": "",
     "nome": "Sistema Comercial",
-    "slogan": "Seu Slogam aqui",
+    "slogan": "Seu slogan aqui",
     "cidade": "Sua cidade aqui",
     "estado": "",
     "segmento": "Loja/Comércio",
-    "icone": "",
-    "saudacao_dashboard": "Olá,👋",
-    "mensagem_dashboard": "Bem-vinda de volta.",
+    "icone": "🏪",
+    "saudacao_dashboard": "Olá 👋",
+    "mensagem_dashboard": "Bem-vindo de volta.",
 }
 
 CORES = {
@@ -47,13 +47,6 @@ STATUS_PEDIDO = [
     "Pago",
     "Entregue",
     "Cancelado",
-]
-
-STATUS_CONSULTORA = [
-    "Ativa",
-    "Inativa",
-    "Em análise",
-    "Bloqueada",
 ]
 
 CATEGORIAS_PRODUTO = [

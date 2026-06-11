@@ -8,7 +8,7 @@ from config import DATABASE_PATH, CATEGORIAS_PRODUTO
 
 
 def conectar():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -22,10 +22,12 @@ def dinheiro(valor):
 
 def executar_sql(sql, params=()):
     conn = conectar()
-    cursor = conn.cursor()
-    cursor.execute(sql, params)
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def carregar_produtos():
@@ -64,7 +66,7 @@ def gerar_sku_automatico():
     conn.close()
 
     proximo_id = 1 if ultimo_id is None else int(ultimo_id) + 1
-    return f"AB{proximo_id:05d}"
+    return f"PR{proximo_id:05d}"
 
 
 def calcular_margem(preco, custo):
@@ -174,15 +176,56 @@ def atualizar_produto(
     )
 
 
+def card_resumo(titulo, valor, ajuda):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{titulo}</div>
+            <div class="metric-value">{valor}</div>
+            <div class="metric-help">{ajuda}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def card_produto(produto):
+    status = "Ativo" if int(produto["ativo"]) == 1 else "Inativo"
+    alerta = (
+        "⚠️ Estoque baixo"
+        if int(produto["ativo"]) == 1 and int(produto["estoque_atual"]) <= int(produto["estoque_minimo"])
+        else "✅ Estoque ok"
+    )
+
+    st.markdown(
+        f"""
+        <div class="panel">
+            <div class="panel-title">📦 {produto["nome"]}</div>
+            <div class="op-msg">
+                SKU: <b>{produto["codigo_sku"] or "-"}</b><br>
+                Categoria: <b>{produto["categoria"] or "-"}</b><br>
+                Marca: <b>{produto["marca"] or "-"}</b><br><br>
+                Venda: <b>{dinheiro(produto["preco_venda"])}</b><br>
+                Atacado: <b>{dinheiro(produto["preco_atacado"])}</b><br>
+                Custo: <b>{dinheiro(produto["custo"])}</b><br><br>
+                Estoque: <b>{int(produto["estoque_atual"])}</b> · Mínimo: <b>{int(produto["estoque_minimo"])}</b><br>
+                Status: <b>{status}</b><br>
+                {alerta}
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def tela_produtos():
     st.markdown(
         """
         <div class="hero">
-            <div class="hero-small">Catálogo Airesbella</div>
+            <div class="hero-small">Catálogo</div>
             <div class="hero-title">Produtos</div>
             <div class="hero-subtitle">
-                Cadastro simples para operação real: produto, preço, estoque, marca, fornecedor e localização.
-                O SKU e a data são gerados automaticamente pelo sistema.
+                Cadastre, consulte e edite produtos com preços, estoque, marca, fornecedor e localização.
             </div>
         </div>
         """,
@@ -207,105 +250,84 @@ def tela_produtos():
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Produtos cadastrados</div>
-                <div class="metric-value">{total_produtos}</div>
-                <div class="metric-help">Total geral no sistema</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        card_resumo("Produtos", total_produtos, "Total cadastrado")
 
     with col2:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Produtos ativos</div>
-                <div class="metric-value">{produtos_ativos}</div>
-                <div class="metric-help">Disponíveis para venda</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        card_resumo("Ativos", produtos_ativos, "Disponíveis para venda")
 
     with col3:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Itens em estoque</div>
-                <div class="metric-value">{estoque_total}</div>
-                <div class="metric-help">Soma de todas as unidades</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        card_resumo("Estoque", estoque_total, "Unidades totais")
 
     with col4:
-        st.markdown(
-            f"""
-            <div class="metric-card">
-                <div class="metric-label">Estoque baixo</div>
-                <div class="metric-value">{estoque_baixo}</div>
-                <div class="metric-help">Produtos em alerta</div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        card_resumo("Alertas", estoque_baixo, "Produtos com estoque baixo")
 
-    st.markdown('<div class="section-title">Cadastrar novo produto</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">Cadastrar produto</div>', unsafe_allow_html=True)
 
     sku_sugerido = gerar_sku_automatico()
 
     with st.form("form_cadastrar_produto", clear_on_submit=True):
-        st.info(f"SKU automático sugerido: {sku_sugerido}")
+        st.markdown(
+            f"""
+            <div class="alert-good">
+                SKU automático sugerido: <b>{sku_sugerido}</b>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.markdown('<div class="panel-title">📦 Dados do produto</div>', unsafe_allow_html=True)
 
         c1, c2 = st.columns([2, 1])
 
         with c1:
-            nome = st.text_input("Nome do produto *", placeholder="Ex: Gloss Morango Vivai")
+            nome = st.text_input("Nome do produto *", placeholder="Ex: Gloss Morango")
 
         with c2:
             categoria = st.selectbox("Categoria", CATEGORIAS_PRODUTO)
 
-        c3, c4, c5 = st.columns(3)
+        c3, c4 = st.columns(2)
 
         with c3:
-            marca = st.text_input("Marca", placeholder="Ex: Vivai, Ruby Rose, Wepink")
+            marca = st.text_input("Marca", placeholder="Ex: Ruby Rose")
 
         with c4:
-            fornecedor = st.text_input("Fornecedor", placeholder="Ex: SatisMake, SP Atacado")
+            fornecedor = st.text_input("Fornecedor", placeholder="Ex: Atacado SP")
 
-        with c5:
-            localizacao = st.text_input("Localização na loja", placeholder="Ex: Expositor A, Cesto 1")
+        localizacao = st.text_input("Localização", placeholder="Ex: Expositor A, Prateleira 2")
 
-        c6, c7, c8 = st.columns(3)
+        st.markdown('<div class="panel-title">💰 Preços</div>', unsafe_allow_html=True)
 
-        with c6:
+        p1, p2, p3 = st.columns(3)
+
+        with p1:
             custo = st.number_input("Custo unitário", min_value=0.0, step=0.5, format="%.2f")
 
-        with c7:
+        with p2:
             preco_venda = st.number_input("Preço de venda", min_value=0.0, step=0.5, format="%.2f")
 
-        with c8:
+        with p3:
             preco_atacado = st.number_input("Preço atacado", min_value=0.0, step=0.5, format="%.2f")
 
-        c9, c10, c11, c12 = st.columns(4)
+        margem_loja = calcular_margem(preco_venda, custo)
+        margem_atacado = calcular_margem(preco_atacado, custo)
 
-        with c9:
+        m1, m2 = st.columns(2)
+
+        with m1:
+            st.metric("Margem venda", f"{margem_loja:.1f}%")
+
+        with m2:
+            st.metric("Margem atacado", f"{margem_atacado:.1f}%")
+
+        st.markdown('<div class="panel-title">📊 Estoque</div>', unsafe_allow_html=True)
+
+        e1, e2 = st.columns(2)
+
+        with e1:
             estoque_atual = st.number_input("Quantidade em estoque", min_value=0, step=1)
 
-        with c10:
+        with e2:
             estoque_minimo = st.number_input("Estoque mínimo", min_value=0, step=1)
-
-        with c11:
-            margem_loja = calcular_margem(preco_venda, custo)
-            st.metric("Margem loja", f"{margem_loja:.1f}%")
-
-        with c12:
-            margem_atacado = calcular_margem(preco_atacado, custo)
-            st.metric("Margem atacado", f"{margem_atacado:.1f}%")
 
         salvar = st.form_submit_button("Salvar produto")
 
@@ -314,23 +336,6 @@ def tela_produtos():
                 st.error("Informe o nome do produto.")
             elif preco_venda < custo:
                 st.error("O preço de venda está menor que o custo.")
-            elif preco_atacado < custo:
-                st.warning("Atenção: preço consultora está menor que o custo.")
-                cadastrar_produto(
-                    nome.strip(),
-                    categoria,
-                    sku_sugerido,
-                    marca.strip(),
-                    fornecedor.strip(),
-                    localizacao.strip(),
-                    custo,
-                    preco_venda,
-                    preco_atacado,
-                    estoque_atual,
-                    estoque_minimo,
-                )
-                st.success("Produto cadastrado com aviso de margem.")
-                st.rerun()
             else:
                 try:
                     cadastrar_produto(
@@ -346,8 +351,14 @@ def tela_produtos():
                         estoque_atual,
                         estoque_minimo,
                     )
-                    st.success("Produto cadastrado com sucesso.")
+
+                    if preco_atacado < custo:
+                        st.warning("Produto cadastrado, mas o preço atacado está menor que o custo.")
+                    else:
+                        st.success("Produto cadastrado com sucesso.")
+
                     st.rerun()
+
                 except sqlite3.IntegrityError:
                     st.error("Erro: SKU já existente. Atualize a página e tente novamente.")
                 except Exception as e:
@@ -368,17 +379,16 @@ def tela_produtos():
         )
         return
 
-    f1, f2, f3 = st.columns([2, 1, 1])
+    f1, f2 = st.columns([2, 1])
 
     with f1:
         busca = st.text_input("Buscar produto", placeholder="Digite nome, SKU, marca ou fornecedor...")
 
     with f2:
-        categorias = ["Todas"] + sorted([x for x in produtos_df["categoria"].dropna().unique()])
-        filtro_categoria = st.selectbox("Categoria", categorias)
-
-    with f3:
         filtro_status = st.selectbox("Status", ["Todos", "Ativos", "Inativos", "Estoque baixo"])
+
+    categorias = ["Todas"] + sorted([x for x in produtos_df["categoria"].dropna().unique()])
+    filtro_categoria = st.selectbox("Categoria", categorias)
 
     df = produtos_df.copy()
 
@@ -401,53 +411,86 @@ def tela_produtos():
     elif filtro_status == "Estoque baixo":
         df = df[(df["ativo"] == 1) & (df["estoque_atual"] <= df["estoque_minimo"])]
 
-    df["Margem Loja"] = df.apply(lambda x: f"{calcular_margem(x['preco_venda'], x['custo']):.1f}%", axis=1)
-    df["Margem Consultora"] = df.apply(
-        lambda x: f"{calcular_margem(x['preco_atacado'], x['custo']):.1f}%", axis=1
-    )
-    df["Custo"] = df["custo"].apply(dinheiro)
-    df["Preço Venda"] = df["preco_venda"].apply(dinheiro)
-    df["Preço Consultora"] = df["preco_atacado"].apply(dinheiro)
-    df["Status"] = df["ativo"].apply(lambda x: "Ativo" if x == 1 else "Inativo")
-    df["Alerta"] = df.apply(
-        lambda x: "⚠️ Baixo" if x["ativo"] == 1 and x["estoque_atual"] <= x["estoque_minimo"] else "OK",
-        axis=1,
-    )
+    if df.empty:
+        st.markdown(
+            '<div class="empty-state">Nenhum produto encontrado com os filtros atuais.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            f"""
+            <div class="alert-good">
+                {len(df)} produto(s) encontrado(s).
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    tabela = df[
-        [
-            "id",
-            "codigo_sku",
-            "nome",
-            "categoria",
-            "marca",
-            "fornecedor",
-            "localizacao",
-            "Custo",
-            "Preço Venda",
-            "Preço Consultora",
-            "Margem Loja",
-            "Margem Consultora",
-            "estoque_atual",
-            "estoque_minimo",
-            "Status",
-            "Alerta",
-        ]
-    ].rename(
-        columns={
-            "id": "ID",
-            "codigo_sku": "SKU",
-            "nome": "Produto",
-            "categoria": "Categoria",
-            "marca": "Marca",
-            "fornecedor": "Fornecedor",
-            "localizacao": "Local",
-            "estoque_atual": "Estoque",
-            "estoque_minimo": "Mínimo",
-        }
-    )
+        for _, produto in df.head(12).iterrows():
+            card_produto(produto)
 
-    st.dataframe(tabela, use_container_width=True, hide_index=True)
+        if len(df) > 12:
+            st.info("Mostrando os 12 primeiros produtos. Use a busca ou os filtros para refinar.")
+
+        with st.expander("Ver tabela completa"):
+            tabela = df.copy()
+
+            tabela["Margem Venda"] = tabela.apply(
+                lambda x: f"{calcular_margem(x['preco_venda'], x['custo']):.1f}%",
+                axis=1,
+            )
+
+            tabela["Margem Atacado"] = tabela.apply(
+                lambda x: f"{calcular_margem(x['preco_atacado'], x['custo']):.1f}%",
+                axis=1,
+            )
+
+            tabela["Custo"] = tabela["custo"].apply(dinheiro)
+            tabela["Preço Venda"] = tabela["preco_venda"].apply(dinheiro)
+            tabela["Preço Atacado"] = tabela["preco_atacado"].apply(dinheiro)
+            tabela["Status"] = tabela["ativo"].apply(lambda x: "Ativo" if x == 1 else "Inativo")
+
+            tabela["Alerta"] = tabela.apply(
+                lambda x: "⚠️ Baixo"
+                if x["ativo"] == 1 and x["estoque_atual"] <= x["estoque_minimo"]
+                else "OK",
+                axis=1,
+            )
+
+            tabela = tabela[
+                [
+                    "id",
+                    "codigo_sku",
+                    "nome",
+                    "categoria",
+                    "marca",
+                    "fornecedor",
+                    "localizacao",
+                    "Custo",
+                    "Preço Venda",
+                    "Preço Atacado",
+                    "Margem Venda",
+                    "Margem Atacado",
+                    "estoque_atual",
+                    "estoque_minimo",
+                    "Status",
+                    "Alerta",
+                ]
+            ].rename(
+                columns={
+                    "id": "ID",
+                    "codigo_sku": "SKU",
+                    "nome": "Produto",
+                    "categoria": "Categoria",
+                    "marca": "Marca",
+                    "fornecedor": "Fornecedor",
+                    "localizacao": "Local",
+                    "estoque_atual": "Estoque",
+                    "estoque_minimo": "Mínimo",
+                }
+            )
+
+            st.dataframe(tabela, use_container_width=True, hide_index=True)
 
     st.markdown('<div class="section-title">Editar produto</div>', unsafe_allow_html=True)
 
@@ -457,7 +500,23 @@ def tela_produtos():
     produto_id = int(selecionado.split(" - ")[0])
     produto = produtos_df[produtos_df["id"] == produto_id].iloc[0]
 
+    st.markdown(
+        f"""
+        <div class="panel">
+            <div class="panel-title">Editando: {produto["nome"]}</div>
+            <div class="op-msg">
+                SKU: <b>{produto["codigo_sku"] or "-"}</b><br>
+                Estoque atual: <b>{int(produto["estoque_atual"])}</b><br>
+                Preço atual: <b>{dinheiro(produto["preco_venda"])}</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     with st.form("form_editar_produto"):
+        st.markdown('<div class="panel-title">📦 Dados</div>', unsafe_allow_html=True)
+
         e1, e2 = st.columns([2, 1])
 
         with e1:
@@ -466,7 +525,7 @@ def tela_produtos():
         with e2:
             sku_edit = st.text_input("SKU", value=produto["codigo_sku"] or "", disabled=True)
 
-        e3, e4, e5 = st.columns(3)
+        e3, e4 = st.columns(2)
 
         with e3:
             categoria_edit = st.selectbox(
@@ -478,34 +537,27 @@ def tela_produtos():
             )
 
         with e4:
-            marca_edit = st.text_input("Marca", value=produto["marca"] or "")
-
-        with e5:
-            fornecedor_edit = st.text_input("Fornecedor", value=produto["fornecedor"] or "")
-
-        e6, e7, e8 = st.columns(3)
-
-        with e6:
-            localizacao_edit = st.text_input("Localização", value=produto["localizacao"] or "")
-
-        with e7:
             status_edit = st.selectbox(
                 "Status",
                 ["Ativo", "Inativo"],
                 index=0 if int(produto["ativo"]) == 1 else 1,
             )
 
-        with e8:
-            estoque_minimo_edit = st.number_input(
-                "Estoque mínimo",
-                min_value=0,
-                step=1,
-                value=int(produto["estoque_minimo"]),
-            )
+        e5, e6 = st.columns(2)
 
-        e9, e10, e11, e12 = st.columns(4)
+        with e5:
+            marca_edit = st.text_input("Marca", value=produto["marca"] or "")
 
-        with e9:
+        with e6:
+            fornecedor_edit = st.text_input("Fornecedor", value=produto["fornecedor"] or "")
+
+        localizacao_edit = st.text_input("Localização", value=produto["localizacao"] or "")
+
+        st.markdown('<div class="panel-title">💰 Preços</div>', unsafe_allow_html=True)
+
+        p1, p2, p3 = st.columns(3)
+
+        with p1:
             custo_edit = st.number_input(
                 "Custo",
                 min_value=0.0,
@@ -514,7 +566,7 @@ def tela_produtos():
                 format="%.2f",
             )
 
-        with e10:
+        with p2:
             preco_venda_edit = st.number_input(
                 "Preço venda",
                 min_value=0.0,
@@ -523,21 +575,33 @@ def tela_produtos():
                 format="%.2f",
             )
 
-        with e11:
+        with p3:
             preco_atacado_edit = st.number_input(
-                "Preço consultora",
+                "Preço atacado",
                 min_value=0.0,
                 step=0.5,
                 value=float(produto["preco_atacado"]),
                 format="%.2f",
             )
 
-        with e12:
+        st.markdown('<div class="panel-title">📊 Estoque</div>', unsafe_allow_html=True)
+
+        s1, s2 = st.columns(2)
+
+        with s1:
             estoque_edit = st.number_input(
                 "Estoque atual",
                 min_value=0,
                 step=1,
                 value=int(produto["estoque_atual"]),
+            )
+
+        with s2:
+            estoque_minimo_edit = st.number_input(
+                "Estoque mínimo",
+                min_value=0,
+                step=1,
+                value=int(produto["estoque_minimo"]),
             )
 
         b1, b2 = st.columns(2)

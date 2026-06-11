@@ -12,26 +12,30 @@ from config import DATABASE_PATH
 
 def get_connection():
     Path("database").mkdir(exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 def executar_sql(sql, parametros=()):
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql, parametros)
-    conn.commit()
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql, parametros)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def consultar_sql(sql, parametros=()):
     conn = get_connection()
-    cursor = conn.cursor()
-    cursor.execute(sql, parametros)
-    dados = cursor.fetchall()
-    conn.close()
-    return dados
+    try:
+        cursor = conn.cursor()
+        cursor.execute(sql, parametros)
+        dados = cursor.fetchall()
+        return dados
+    finally:
+        conn.close()
 
 
 def gerar_hash_senha(senha):
@@ -40,10 +44,13 @@ def gerar_hash_senha(senha):
 
 
 def verificar_senha(senha_digitada, senha_hash):
-    return bcrypt.checkpw(
-        senha_digitada.encode("utf-8"),
-        senha_hash.encode("utf-8")
-    )
+    try:
+        return bcrypt.checkpw(
+            senha_digitada.encode("utf-8"),
+            senha_hash.encode("utf-8")
+        )
+    except Exception:
+        return False
 
 
 def criar_tabelas():
@@ -58,7 +65,8 @@ def criar_tabelas():
             senha_hash TEXT NOT NULL,
             perfil TEXT NOT NULL DEFAULT 'admin',
             ativo INTEGER NOT NULL DEFAULT 1,
-            criado_em TEXT NOT NULL
+            criado_em TEXT NOT NULL,
+            ultimo_login TEXT
         )
     """)
 
@@ -185,20 +193,21 @@ def criar_tabelas():
 
 def adicionar_coluna_se_nao_existir(tabela, coluna, definicao):
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"PRAGMA table_info({tabela})")
+        colunas = [info["name"] for info in cursor.fetchall()]
 
-    cursor.execute(f"PRAGMA table_info({tabela})")
-    colunas = [info["name"] for info in cursor.fetchall()]
-
-    if coluna not in colunas:
-        cursor.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {definicao}")
-        conn.commit()
-
-    conn.close()
+        if coluna not in colunas:
+            cursor.execute(f"ALTER TABLE {tabela} ADD COLUMN {coluna} {definicao}")
+            conn.commit()
+    finally:
+        conn.close()
 
 
 def atualizar_estrutura_banco():
-    
+    adicionar_coluna_se_nao_existir("usuarios", "ultimo_login", "TEXT")
+
     adicionar_coluna_se_nao_existir("produtos", "preco_atacado", "REAL DEFAULT 0")
     adicionar_coluna_se_nao_existir("produtos", "marca", "TEXT")
     adicionar_coluna_se_nao_existir("produtos", "fornecedor", "TEXT")
@@ -232,6 +241,96 @@ def criar_usuario_admin_padrao():
             1,
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ))
+
+
+def autenticar_usuario(usuario, senha):
+    dados = consultar_sql(
+        """
+        SELECT id, nome, usuario, senha_hash, perfil, ativo
+        FROM usuarios
+        WHERE usuario = ?
+        LIMIT 1
+        """,
+        (usuario,)
+    )
+
+    if not dados:
+        return None
+
+    usuario_db = dados[0]
+
+    if int(usuario_db["ativo"]) != 1:
+        return None
+
+    if not verificar_senha(senha, usuario_db["senha_hash"]):
+        return None
+
+    executar_sql(
+        """
+        UPDATE usuarios
+        SET ultimo_login = ?
+        WHERE id = ?
+        """,
+        (
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            usuario_db["id"]
+        )
+    )
+
+    return {
+        "id": usuario_db["id"],
+        "nome": usuario_db["nome"],
+        "usuario": usuario_db["usuario"],
+        "perfil": usuario_db["perfil"],
+    }
+
+
+def listar_usuarios():
+    return consultar_sql(
+        """
+        SELECT id, nome, usuario, perfil, ativo, criado_em, ultimo_login
+        FROM usuarios
+        ORDER BY id DESC
+        """
+    )
+
+
+def criar_usuario(nome, usuario, senha, perfil="funcionario", ativo=1):
+    senha_hash = gerar_hash_senha(senha)
+    executar_sql("""
+        INSERT INTO usuarios (nome, usuario, senha_hash, perfil, ativo, criado_em)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (
+        nome,
+        usuario,
+        senha_hash,
+        perfil,
+        ativo,
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ))
+
+
+def alterar_senha_usuario(usuario_id, nova_senha):
+    senha_hash = gerar_hash_senha(nova_senha)
+    executar_sql(
+        """
+        UPDATE usuarios
+        SET senha_hash = ?
+        WHERE id = ?
+        """,
+        (senha_hash, usuario_id)
+    )
+
+
+def ativar_desativar_usuario(usuario_id, ativo):
+    executar_sql(
+        """
+        UPDATE usuarios
+        SET ativo = ?
+        WHERE id = ?
+        """,
+        (ativo, usuario_id)
+    )
 
 
 def registrar_log(usuario, acao, detalhes=""):

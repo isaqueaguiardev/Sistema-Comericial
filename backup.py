@@ -25,7 +25,7 @@ def criar_backup_manual():
         return False, "Banco de dados não encontrado."
 
     agora = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    destino = BACKUP_DIR / f"backup_manual_airesbella_{agora}.db"
+    destino = BACKUP_DIR / f"backup_manual_sistema_{agora}.db"
 
     shutil.copy2(origem, destino)
 
@@ -41,7 +41,7 @@ def criar_backup_automatico_diario():
         return False, "Banco de dados não encontrado."
 
     hoje = datetime.now().strftime("%Y_%m_%d")
-    destino = BACKUP_DIR / f"backup_auto_airesbella_{hoje}.db"
+    destino = BACKUP_DIR / f"backup_auto_sistema_{hoje}.db"
 
     if destino.exists():
         return True, "Backup automático de hoje já existe."

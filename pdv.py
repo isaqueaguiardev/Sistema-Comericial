@@ -19,7 +19,7 @@ ORIGENS_CLIENTE = [
 
 
 def conectar():
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = sqlite3.connect(DATABASE_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -33,18 +33,13 @@ def dinheiro(valor):
 
 def carregar_produtos_ativos():
     conn = conectar()
-
     cursor = conn.cursor()
+
     cursor.execute("PRAGMA table_info(produtos)")
     colunas = [col[1] for col in cursor.fetchall()]
 
     if "preco_atacado" not in colunas:
         cursor.execute("ALTER TABLE produtos ADD COLUMN preco_atacado REAL DEFAULT 0")
-        cursor.execute("""
-            UPDATE produtos
-            SET preco_atacado = COALESCE(preco_consultora, 0)
-            WHERE preco_atacado = 0
-        """)
         conn.commit()
 
     df = pd.read_sql_query(
@@ -59,6 +54,7 @@ def carregar_produtos_ativos():
 
     conn.close()
     return df
+
 
 def buscar_cliente_por_telefone(telefone):
     conn = conectar()
@@ -258,9 +254,76 @@ def limpar_pdv():
         "cliente_nome_pdv",
         "cliente_telefone_pdv",
         "cliente_encontrado_pdv",
+        "cliente_bairro_pdv",
+        "cliente_vip_pdv",
     ]:
         if chave in st.session_state:
             del st.session_state[chave]
+
+
+def resumo_carrinho():
+    carrinho = st.session_state.get("carrinho_pdv", [])
+
+    if not carrinho:
+        return {
+            "itens": 0,
+            "subtotal": 0,
+            "custo": 0,
+            "lucro": 0,
+        }
+
+    subtotal = sum(item["total_item"] for item in carrinho)
+    custo = sum(item["custo_total_item"] for item in carrinho)
+
+    return {
+        "itens": sum(item["quantidade"] for item in carrinho),
+        "subtotal": subtotal,
+        "custo": custo,
+        "lucro": subtotal - custo,
+    }
+
+
+def card_resumo_pdv(titulo, valor, detalhe):
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">{titulo}</div>
+            <div class="metric-value">{valor}</div>
+            <div class="metric-help">{detalhe}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def renderizar_carrinho():
+    carrinho = st.session_state.carrinho_pdv
+
+    if not carrinho:
+        st.markdown(
+            '<div class="empty-state">Nenhum produto adicionado ainda.</div>',
+            unsafe_allow_html=True,
+        )
+        return
+
+    for i, item in enumerate(carrinho):
+        st.markdown(
+            f"""
+            <div class="panel">
+                <div class="panel-title">{item["produto"]}</div>
+                <div class="op-msg">
+                    Quantidade: <b>{item["quantidade"]}</b><br>
+                    Preço unitário: <b>{dinheiro(item["preco_unitario"])}</b><br>
+                    Total do item: <b>{dinheiro(item["total_item"])}</b>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.button(f"Remover item", key=f"remover_item_{i}"):
+            st.session_state.carrinho_pdv.pop(i)
+            st.rerun()
 
 
 def tela_pdv():
@@ -270,7 +333,7 @@ def tela_pdv():
             <div class="hero-small">Venda rápida</div>
             <div class="hero-title">PDV</div>
             <div class="hero-subtitle">
-                Venda rápida, cliente por telefone, cadastro rápido, retirada ou entrega com endereço.
+                Venda em poucos passos: cliente, produto, carrinho, entrega e pagamento.
             </div>
         </div>
         """,
@@ -286,26 +349,40 @@ def tela_pdv():
         st.warning("Cadastre produtos antes de usar o PDV.")
         return
 
-    st.markdown('<div class="section-title">Cliente da venda</div>', unsafe_allow_html=True)
+    resumo = resumo_carrinho()
+
+    r1, r2, r3 = st.columns(3)
+
+    with r1:
+        card_resumo_pdv("Itens", resumo["itens"], "Produtos no carrinho")
+
+    with r2:
+        card_resumo_pdv("Subtotal", dinheiro(resumo["subtotal"]), "Antes de entrega/desconto")
+
+    with r3:
+        card_resumo_pdv("Lucro estimado", dinheiro(resumo["lucro"]), "Baseado no custo cadastrado")
+
+    st.markdown('<div class="section-title">1. Cliente da venda</div>', unsafe_allow_html=True)
 
     modo_cliente = st.radio(
-        "Tipo de identificação",
+        "Escolha como identificar o cliente",
         [
-            "Venda rápida / Consumidor final",
-            "Buscar cliente por telefone",
-            "Cadastrar cliente novo",
+            "Consumidor final",
+            "Buscar por telefone",
+            "Cadastrar novo cliente",
         ],
         horizontal=True,
     )
 
     cliente_id = None
     cliente_nome_exibicao = "Consumidor final"
+    cliente_bairro = ""
 
-    if modo_cliente == "Venda rápida / Consumidor final":
+    if modo_cliente == "Consumidor final":
         cliente_id = None
         cliente_nome_exibicao = "Consumidor final"
 
-    elif modo_cliente == "Buscar cliente por telefone":
+    elif modo_cliente == "Buscar por telefone":
         telefone_busca = st.text_input(
             "Telefone do cliente",
             placeholder="Digite apenas números. Ex: 98999999999",
@@ -315,28 +392,25 @@ def tela_pdv():
             cliente_df = buscar_cliente_por_telefone(telefone_busca.strip())
 
             if cliente_df.empty:
-                st.warning(
-                    "Cliente não encontrado. Use a opção 'Cadastrar cliente novo' "
-                    "ou finalize como consumidor final."
-                )
+                st.warning("Cliente não encontrado. Você pode cadastrar agora ou finalizar como consumidor final.")
             else:
                 cliente = cliente_df.iloc[0]
+
                 st.session_state["cliente_id_pdv"] = int(cliente["id"])
                 st.session_state["cliente_nome_pdv"] = cliente["nome"]
                 st.session_state["cliente_telefone_pdv"] = cliente["telefone"]
+                st.session_state["cliente_bairro_pdv"] = cliente["bairro_povoado"] or ""
+                st.session_state["cliente_vip_pdv"] = cliente["vip"] or "Não"
                 st.session_state["cliente_encontrado_pdv"] = True
+
                 st.success("Cliente encontrado e selecionado.")
+                st.rerun()
 
-        if st.session_state.get("cliente_encontrado_pdv"):
-            cliente_id = st.session_state["cliente_id_pdv"]
-            cliente_nome_exibicao = st.session_state["cliente_nome_pdv"]
-            st.success(
-                f"Cliente selecionado: {cliente_nome_exibicao} | "
-                f"{st.session_state['cliente_telefone_pdv']}"
-            )
-
-    elif modo_cliente == "Cadastrar cliente novo":
-        st.info("Cadastre o cliente novo aqui mesmo. Ele ficará salvo para compras futuras.")
+    elif modo_cliente == "Cadastrar novo cliente":
+        st.markdown(
+            '<div class="empty-state">Cadastre o cliente rapidamente. Ele ficará salvo para compras futuras.</div>',
+            unsafe_allow_html=True,
+        )
 
         r1, r2 = st.columns([2, 1])
 
@@ -346,7 +420,7 @@ def tela_pdv():
         with r2:
             novo_telefone = st.text_input("Telefone/WhatsApp *")
 
-        r3, r4, r5 = st.columns(3)
+        r3, r4 = st.columns(2)
 
         with r3:
             nova_cidade = st.text_input("Cidade", placeholder="Ex: Itapecuru Mirim")
@@ -354,12 +428,15 @@ def tela_pdv():
         with r4:
             novo_bairro = st.text_input("Bairro/Região *")
 
+        r5, r6 = st.columns(2)
+
         with r5:
             nova_origem = st.selectbox("Origem", ORIGENS_CLIENTE)
 
-        novo_vip = st.selectbox("Cliente VIP?", ["Não", "Sim"])
+        with r6:
+            novo_vip = st.selectbox("Cliente VIP?", ["Não", "Sim"])
 
-        if st.button("Salvar cliente novo"):
+        if st.button("Salvar e usar este cliente"):
             if not novo_nome.strip():
                 st.error("Informe o nome do cliente.")
             elif not novo_telefone.strip():
@@ -379,38 +456,67 @@ def tela_pdv():
                 st.session_state["cliente_id_pdv"] = novo_id
                 st.session_state["cliente_nome_pdv"] = novo_nome.strip()
                 st.session_state["cliente_telefone_pdv"] = novo_telefone.strip()
+                st.session_state["cliente_bairro_pdv"] = novo_bairro.strip()
+                st.session_state["cliente_vip_pdv"] = novo_vip
                 st.session_state["cliente_encontrado_pdv"] = True
 
                 st.success("Cliente cadastrado e selecionado.")
                 st.rerun()
 
-        if st.session_state.get("cliente_encontrado_pdv"):
-            cliente_id = st.session_state["cliente_id_pdv"]
-            cliente_nome_exibicao = st.session_state["cliente_nome_pdv"]
-            st.success(f"Cliente selecionado: {cliente_nome_exibicao}")
+    if st.session_state.get("cliente_encontrado_pdv"):
+        cliente_id = st.session_state["cliente_id_pdv"]
+        cliente_nome_exibicao = st.session_state["cliente_nome_pdv"]
+        cliente_bairro = st.session_state.get("cliente_bairro_pdv", "")
+        vip = st.session_state.get("cliente_vip_pdv", "Não")
 
-    st.markdown('<div class="section-title">Adicionar produto à venda</div>', unsafe_allow_html=True)
+        detalhe_vip = "⭐ Cliente VIP" if vip == "Sim" else "Cliente comum"
 
-    col1, col2, col3 = st.columns([2, 1, 1])
+        st.markdown(
+            f"""
+            <div class="alert-good">
+                Cliente selecionado: <b>{cliente_nome_exibicao}</b><br>
+                {detalhe_vip}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown('<div class="section-title">2. Produto</div>', unsafe_allow_html=True)
+
+    busca_produto = st.text_input("Pesquisar produto", placeholder="Digite parte do nome ou SKU")
+
+    produtos_filtrados = produtos.copy()
+
+    if busca_produto.strip():
+        termo = busca_produto.strip().lower()
+        produtos_filtrados = produtos_filtrados[
+            produtos_filtrados["nome"].fillna("").str.lower().str.contains(termo)
+            | produtos_filtrados["codigo_sku"].fillna("").str.lower().str.contains(termo)
+        ]
+
+    if produtos_filtrados.empty:
+        st.warning("Nenhum produto encontrado com esse filtro.")
+        return
 
     produto_opcoes = (
-        produtos["id"].astype(str)
+        produtos_filtrados["id"].astype(str)
         + " - "
-        + produtos["nome"]
+        + produtos_filtrados["nome"]
         + " | Estoque: "
-        + produtos["estoque_atual"].astype(str)
+        + produtos_filtrados["estoque_atual"].astype(str)
     )
 
-    with col1:
-        produto_selecionado = st.selectbox("Produto", produto_opcoes)
+    produto_selecionado = st.selectbox("Produto", produto_opcoes)
 
     produto_id = int(produto_selecionado.split(" - ")[0])
     produto = produtos[produtos["id"] == produto_id].iloc[0]
 
-    with col2:
+    c1, c2 = st.columns(2)
+
+    with c1:
         tipo_preco = st.selectbox("Preço usado", ["Varejo", "Atacado"])
 
-    with col3:
+    with c2:
         quantidade = st.number_input("Quantidade", min_value=1, step=1)
 
     preco_unitario = (
@@ -422,9 +528,17 @@ def tela_pdv():
     custo_unitario = float(produto["custo"])
     estoque_atual = int(produto["estoque_atual"])
 
-    st.info(f"Preço: {dinheiro(preco_unitario)} | Estoque disponível: {estoque_atual}")
+    st.markdown(
+        f"""
+        <div class="alert-good">
+            Produto selecionado: <b>{produto["nome"]}</b><br>
+            Preço: <b>{dinheiro(preco_unitario)}</b> · Estoque disponível: <b>{estoque_atual}</b>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    if st.button("Adicionar ao carrinho"):
+    if st.button("Adicionar ao carrinho", type="primary"):
         if quantidade > estoque_atual:
             st.error("Quantidade maior que o estoque disponível.")
         else:
@@ -448,35 +562,18 @@ def tela_pdv():
             st.success("Produto adicionado ao carrinho.")
             st.rerun()
 
-    st.markdown('<div class="section-title">Carrinho da venda</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">3. Carrinho</div>', unsafe_allow_html=True)
+
+    renderizar_carrinho()
 
     if not st.session_state.carrinho_pdv:
-        st.markdown(
-            '<div class="empty-state">Nenhum produto adicionado ainda.</div>',
-            unsafe_allow_html=True,
-        )
         return
 
     carrinho_df = pd.DataFrame(st.session_state.carrinho_pdv)
-    carrinho_view = carrinho_df.copy()
-    carrinho_view["Preço"] = carrinho_view["preco_unitario"].apply(dinheiro)
-    carrinho_view["Total"] = carrinho_view["total_item"].apply(dinheiro)
-
-    st.dataframe(
-        carrinho_view[["produto", "quantidade", "Preço", "Total"]].rename(
-            columns={
-                "produto": "Produto",
-                "quantidade": "Qtd",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
     subtotal_produtos = carrinho_df["total_item"].sum()
     custo_total = carrinho_df["custo_total_item"].sum()
 
-    st.markdown('<div class="section-title">Entrega ou retirada</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">4. Entrega</div>', unsafe_allow_html=True)
 
     tipo_entrega = st.radio("Tipo de entrega", ["Retirada", "Entrega"], horizontal=True)
 
@@ -486,23 +583,22 @@ def tela_pdv():
     taxa_entrega = 0.0
 
     if tipo_entrega == "Entrega":
-        e1, e2 = st.columns([2, 1])
+        endereco_entrega = st.text_input(
+            "Endereço de entrega *",
+            placeholder="Rua, número, complemento",
+        )
 
-        with e1:
-            endereco_entrega = st.text_input(
-                "Endereço de entrega *",
-                placeholder="Rua, número, complemento",
-            )
+        bairro_entrega = st.text_input(
+            "Bairro/Região da entrega *",
+            value=cliente_bairro,
+        )
 
-        with e2:
-            bairro_entrega = st.text_input("Bairro/Região da entrega *")
+        c1, c2 = st.columns([2, 1])
 
-        e3, e4 = st.columns([2, 1])
-
-        with e3:
+        with c1:
             referencia_entrega = st.text_input("Ponto de referência")
 
-        with e4:
+        with c2:
             taxa_entrega = st.number_input(
                 "Taxa de entrega",
                 min_value=0.0,
@@ -510,29 +606,26 @@ def tela_pdv():
                 format="%.2f",
             )
 
-    st.markdown('<div class="section-title">Finalizar venda</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-title">5. Pagamento</div>', unsafe_allow_html=True)
 
-    f1, f2, f3 = st.columns(3)
-
-    with f1:
-        tipo_venda = st.selectbox("Tipo de venda", ["Varejo", "Atacado"])
-
-    with f2:
-        st.text_input("Canal", value="Venda direta", disabled=True)
-
-    with f3:
-        forma_pagamento = st.selectbox("Forma de pagamento", FORMAS_PAGAMENTO)
-
-    p1, p2, p3 = st.columns(3)
+    p1, p2 = st.columns(2)
 
     with p1:
+        tipo_venda = st.selectbox("Tipo de venda", ["Varejo", "Atacado"])
+
+    with p2:
+        forma_pagamento = st.selectbox("Forma de pagamento", FORMAS_PAGAMENTO)
+
+    p3, p4 = st.columns(2)
+
+    with p3:
         status = st.selectbox(
             "Status do pedido",
             STATUS_PEDIDO,
             index=1 if "Pago" in STATUS_PEDIDO else 0,
         )
 
-    with p2:
+    with p4:
         desconto = st.number_input(
             "Desconto",
             min_value=0.0,
@@ -543,21 +636,22 @@ def tela_pdv():
     total_final = subtotal_produtos + taxa_entrega - desconto
     lucro_estimado = total_final - custo_total
 
-    with p3:
-        st.metric("Total final", dinheiro(total_final))
-
-    m1, m2, m3 = st.columns(3)
-
-    with m1:
-        st.metric("Produtos", dinheiro(subtotal_produtos))
-
-    with m2:
-        st.metric("Custo", dinheiro(custo_total))
-
-    with m3:
-        st.metric("Lucro estimado", dinheiro(lucro_estimado))
-
-    st.info(f"Cliente vinculado: {cliente_nome_exibicao}")
+    st.markdown(
+        f"""
+        <div class="panel">
+            <div class="panel-title">Resumo da venda</div>
+            <div class="op-msg">
+                Cliente: <b>{cliente_nome_exibicao}</b><br><br>
+                Produtos: <b>{dinheiro(subtotal_produtos)}</b><br>
+                Entrega: <b>{dinheiro(taxa_entrega)}</b><br>
+                Desconto: <b>{dinheiro(desconto)}</b><br><br>
+                Total final: <b>{dinheiro(total_final)}</b><br>
+                Lucro estimado: <b>{dinheiro(lucro_estimado)}</b>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     observacoes = st.text_area("Observações")
 
